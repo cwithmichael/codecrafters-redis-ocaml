@@ -1,3 +1,5 @@
+let ( let* ) = Lwt.bind
+
 let read_until_crlf buf pos =
   let rec aux i =
     if
@@ -18,7 +20,6 @@ type redis_value =
 
 let parse_int buf pos =
   let num_str, next_pos = read_until_crlf buf pos in
-  Printf.printf "%s\n" num_str;
   RedisInt (int_of_string num_str, next_pos)
 
 let parse_bulk_string buf pos =
@@ -65,6 +66,34 @@ let parse_redis_input buf pos =
 let dict = Hashtbl.create 10
 let dict_mutex = Mutex.create ()
 
+let update_dict key value =
+  Mutex.lock dict_mutex;
+  Hashtbl.add dict key value;
+  Mutex.unlock dict_mutex
+
+exception Timeout
+
+let delay_execution f timeout =
+  let* () = Lwt_unix.sleep timeout in
+  f ()
+
+let handle_set_sub cmd v key =
+  match cmd with
+  | Some _ -> (
+      (*only handle px for now*)
+      match v with
+      | Some delay ->
+          delay_execution
+            (fun () ->
+              let* () = Lwt_io.printf "%s\n" "HERE" in
+              Mutex.lock dict_mutex;
+              Hashtbl.remove dict key;
+              Mutex.unlock dict_mutex;
+              Lwt.return ())
+            delay
+      | None -> Lwt.return_unit)
+  | None -> failwith "Unsupported subcommand"
+
 let check_for_redis_command input =
   match List.hd input with
   | Some cmd -> (
@@ -76,11 +105,25 @@ let check_for_redis_command input =
               Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length s) s)
           | _ -> failwith "Invalid input for echo")
       | "set" -> (
-          match (List.nth_opt input 1, List.nth_opt input 2) with
-          | Some (Some key), Some (Some value) ->
-              Mutex.lock dict_mutex;
-              Hashtbl.add dict key value;
-              Mutex.unlock dict_mutex;
+          match
+            ( List.nth_opt input 1,
+              List.nth_opt input 2,
+              List.nth_opt input 3,
+              List.nth_opt input 4 )
+          with
+          | Some (Some key), Some (Some value), None, None ->
+              update_dict key value;
+              Some "+OK\r\n"
+          | Some (Some key), Some (Some value), Some sub_cmd, Some sub_cmd_val
+            ->
+              (* only handle px for now*)
+              update_dict key value;
+              Lwt.ignore_result
+                (handle_set_sub sub_cmd
+                   (match Option.map float_of_string sub_cmd_val with
+                   | Some delay -> Some (delay /. 1000.0)
+                   | None -> failwith "Invalid subcommand value")
+                   key);
               Some "+OK\r\n"
           | _ -> failwith "Invalid input for set")
       | "get" -> (

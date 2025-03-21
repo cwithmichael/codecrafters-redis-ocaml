@@ -7,9 +7,6 @@ let handle_client (input, output) =
     match n with
     | 0 -> Lwt_io.printl "Client disconnected"
     | size ->
-        let* () =
-          Lwt_io.printl ("Received: " ^ String.sub (Bytes.to_string buf) 0 size)
-        in
         let res = Redis.parse_redis_input (Bytes.sub buf 0 size) 0 in
         let* () = Lwt_io.write output (Redis.encode_redis_value res) in
         handle_command ()
