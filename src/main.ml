@@ -1,16 +1,16 @@
-open Unix
+let ( let* ) = Lwt.bind
+
+let start_server port =
+  let sockaddr = Unix.(ADDR_INET (inet_addr_any, port)) in
+  let server_socket = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+
+  Lwt_unix.setsockopt server_socket Unix.SO_REUSEADDR true;
+  let* () = Lwt_unix.bind server_socket sockaddr in
+  Lwt_unix.listen server_socket 10;
+  let* () = Lwt_io.printlf "Server started on port %d" port in
+  let* _sock, _addr = Lwt_unix.accept server_socket in
+  Lwt.return_unit
 
 let () =
-  (* You can use print statements as follows for debugging, they'll be visible when running tests. *)
-  Printf.eprintf "Logs from your program will appear here!\n";
-
-  (* Create a TCP server socket *)
-  let server_socket = socket PF_INET SOCK_STREAM 0 in
-  setsockopt server_socket SO_REUSEADDR true;
-  bind server_socket (ADDR_INET (inet_addr_of_string "127.0.0.1", 6379));
-  listen server_socket 1;
-
-  (* Uncomment this block to pass the first stage *)
-  (* let (client_socket, _) = accept server_socket in *)
-  (* close client_socket; *)
-  (* close server_socket *)
+  let port = 6379 in
+  Lwt_main.run (start_server port)
