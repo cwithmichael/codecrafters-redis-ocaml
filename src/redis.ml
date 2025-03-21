@@ -71,8 +71,6 @@ let update_dict key value =
   Hashtbl.add dict key value;
   Mutex.unlock dict_mutex
 
-exception Timeout
-
 let delay_execution f timeout =
   let* () = Lwt_unix.sleep timeout in
   f ()
@@ -85,7 +83,6 @@ let handle_set_sub cmd v key =
       | Some delay ->
           delay_execution
             (fun () ->
-              let* () = Lwt_io.printf "%s\n" "HERE" in
               Mutex.lock dict_mutex;
               Hashtbl.remove dict key;
               Mutex.unlock dict_mutex;
