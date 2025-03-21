@@ -14,6 +14,7 @@ type redis_value =
   | RedisArray of string option list * int
   | RedisInt of int * int
   | SimpleString of string option * int
+  | NullBulkString
 
 let parse_int buf pos =
   let num_str, next_pos = read_until_crlf buf pos in
@@ -61,6 +62,9 @@ let parse_redis_input buf pos =
   | '$' | '*' | '+' | ':' -> parse_value buf pos
   | _ -> failwith "Invalid input"
 
+let dict = Hashtbl.create 10
+let dict_mutex = Mutex.create ()
+
 let check_for_redis_command input =
   match List.hd input with
   | Some cmd -> (
@@ -70,12 +74,29 @@ let check_for_redis_command input =
           match List.nth_opt input 1 with
           | Some (Some s) ->
               Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length s) s)
-          | Some None | None -> Some "$-1\r\n")
+          | _ -> failwith "Invalid input for echo")
+      | "set" -> (
+          match (List.nth_opt input 1, List.nth_opt input 2) with
+          | Some (Some key), Some (Some value) ->
+              Mutex.lock dict_mutex;
+              Hashtbl.add dict key value;
+              Mutex.unlock dict_mutex;
+              Some "+OK\r\n"
+          | _ -> failwith "Invalid input for set")
+      | "get" -> (
+          match List.nth_opt input 1 with
+          | Some (Some key) -> (
+              match Hashtbl.find_opt dict key with
+              | None -> Some "$-1\r\n"
+              | Some v ->
+                  Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length v) v))
+          | _ -> failwith "Invalid input for set")
       | _ -> failwith "Unsupported command")
   | None -> None
 
 let encode_redis_value = function
   | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
+  | NullBulkString -> "$-1\r\n"
   | BulkString (None, _) -> "$-1\r\n"
   | BulkString (Some str, _) -> (
       match check_for_redis_command [ Some str ] with
@@ -85,11 +106,8 @@ let encode_redis_value = function
   | SimpleString (Some str, _) -> Printf.sprintf "+%s\r\n" str
   | RedisArray (elems, _) -> (
       match check_for_redis_command elems with
-      | Some s ->
-          Printf.printf "%s\n" s;
-          s
+      | Some s -> s
       | None ->
-          Printf.printf "%s\n" "LMAO";
           let encoded_elems =
             List.map (function None -> "$-1\r\n" | Some str -> str) elems
           in
