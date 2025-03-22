@@ -1,3 +1,5 @@
+open Config
+
 let ( let* ) = Lwt.bind
 
 let read_until_crlf buf pos =
@@ -29,7 +31,7 @@ let parse_bulk_string buf pos =
       else
         let str = Bytes.sub_string buf next_pos len in
         BulkString (Some str, next_pos + len + 2)
-  | _ -> failwith "Unsupported"
+  | _ -> NullBulkString
 
 let parse_simple_string buf pos =
   let str, next_pos = read_until_crlf buf pos in
@@ -91,7 +93,22 @@ let handle_set_sub cmd v key =
       | None -> Lwt.return_unit)
   | None -> failwith "Unsupported subcommand"
 
-let check_for_redis_command input =
+let create_bulk_string data =
+  match data with
+  | None -> "$-1\r\n"
+  | Some str -> Printf.sprintf "$%d\r\n%s\r\n" (String.length str) str
+
+let create_array elems =
+  let encoded = List.map create_bulk_string elems in
+  Printf.sprintf "*%d\r\n%s" (List.length elems) (String.concat "" encoded)
+
+let create_array_of_bulk_string data =
+  List.fold_left
+    (fun acc x -> acc ^ create_bulk_string (Some x))
+    (Printf.sprintf "*%d\r\n" (List.length data))
+    data
+
+let check_for_redis_command input config_data =
   match List.hd input with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
@@ -101,6 +118,20 @@ let check_for_redis_command input =
           | Some (Some s) ->
               Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length s) s)
           | _ -> failwith "Invalid input for echo")
+      | "config" -> (
+          match List.nth_opt input 2 with
+          | Some None -> failwith ""
+          | Some (Some s) -> (
+              match String.lowercase_ascii s with
+              | "dir" ->
+                  let dir = ConfigMap.find "dir" config_data in
+                  Some (create_array_of_bulk_string [ "dir"; dir ])
+              | "dbfilename" ->
+                  let dbfilename = ConfigMap.find "dbfilename" config_data in
+                  Some
+                    (create_array_of_bulk_string [ "dbfilename"; dbfilename ])
+              | _ -> failwith "Invalid input for config")
+          | None -> failwith "")
       | "set" -> (
           match
             ( List.nth_opt input 1,
@@ -134,22 +165,17 @@ let check_for_redis_command input =
       | _ -> failwith "Unsupported command")
   | None -> None
 
-let encode_redis_value = function
+let encode_redis_value config_data = function
   | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
   | NullBulkString -> "$-1\r\n"
   | BulkString (None, _) -> "$-1\r\n"
   | BulkString (Some str, _) -> (
-      match check_for_redis_command [ Some str ] with
+      match check_for_redis_command [ Some str ] config_data with
       | Some s -> s
       | None -> "$-1\r\n")
   | SimpleString (None, _) -> "\r\n"
   | SimpleString (Some str, _) -> Printf.sprintf "+%s\r\n" str
   | RedisArray (elems, _) -> (
-      match check_for_redis_command elems with
+      match check_for_redis_command elems config_data with
       | Some s -> s
-      | None ->
-          let encoded_elems =
-            List.map (function None -> "$-1\r\n" | Some str -> str) elems
-          in
-          Printf.sprintf "*%d\r\n%s" (List.length elems)
-            (String.concat "" encoded_elems))
+      | None -> create_array elems)
