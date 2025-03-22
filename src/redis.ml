@@ -177,4 +177,4 @@ let rec encode_redis_value config_data = function
       else
         match check_for_redis_command elems config_data with
         | Some s -> encode_redis_value config_data s
-        | None -> create_array_of_bulk_string elems)
+        | None -> failwith "Bad array data")
