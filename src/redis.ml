@@ -98,13 +98,9 @@ let create_bulk_string data =
   | None -> "$-1\r\n"
   | Some str -> Printf.sprintf "$%d\r\n%s\r\n" (String.length str) str
 
-let create_array elems =
-  let encoded = List.map create_bulk_string elems in
-  Printf.sprintf "*%d\r\n%s" (List.length elems) (String.concat "" encoded)
-
 let create_array_of_bulk_string data =
   List.fold_left
-    (fun acc x -> acc ^ create_bulk_string (Some x))
+    (fun acc x -> acc ^ create_bulk_string x)
     (Printf.sprintf "*%d\r\n" (List.length data))
     data
 
@@ -112,11 +108,10 @@ let check_for_redis_command input config_data =
   match List.hd input with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
-      | "ping" -> Some "+PONG\r\n"
+      | "ping" -> Some (SimpleString (Some "PONG", 0))
       | "echo" -> (
           match List.nth_opt input 1 with
-          | Some (Some s) ->
-              Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length s) s)
+          | Some (Some s) -> Some (SimpleString (Some s, 0))
           | _ -> failwith "Invalid input for echo")
       | "config" -> (
           match List.nth_opt input 2 with
@@ -124,12 +119,13 @@ let check_for_redis_command input config_data =
           | Some (Some s) -> (
               match String.lowercase_ascii s with
               | "dir" ->
-                  let dir = ConfigMap.find "dir" config_data in
-                  Some (create_array_of_bulk_string [ "dir"; dir ])
+                  let dir = ConfigMap.find_opt "dir" config_data in
+                  Some (RedisArray ([ Some "dir"; dir ], -1))
               | "dbfilename" ->
-                  let dbfilename = ConfigMap.find "dbfilename" config_data in
-                  Some
-                    (create_array_of_bulk_string [ "dbfilename"; dbfilename ])
+                  let dbfilename =
+                    ConfigMap.find_opt "dbfilename" config_data
+                  in
+                  Some (RedisArray ([ Some "dbfilename"; dbfilename ], -1))
               | _ -> failwith "Invalid input for config")
           | None -> failwith "")
       | "set" -> (
@@ -141,7 +137,7 @@ let check_for_redis_command input config_data =
           with
           | Some (Some key), Some (Some value), None, None ->
               update_dict key value;
-              Some "+OK\r\n"
+              Some (SimpleString (Some "OK", 0))
           | Some (Some key), Some (Some value), Some sub_cmd, Some sub_cmd_val
             ->
               (* only handle px for now*)
@@ -152,30 +148,33 @@ let check_for_redis_command input config_data =
                    | Some delay -> Some (delay /. 1000.0)
                    | None -> failwith "Invalid subcommand value")
                    key);
-              Some "+OK\r\n"
+              Some (SimpleString (Some "OK", 0))
           | _ -> failwith "Invalid input for set")
       | "get" -> (
           match List.nth_opt input 1 with
           | Some (Some key) -> (
               match Hashtbl.find_opt dict key with
-              | None -> Some "$-1\r\n"
-              | Some v ->
-                  Some (Printf.sprintf "$%d\r\n%s\r\n" (String.length v) v))
+              | None -> Some NullBulkString
+              | Some v -> Some (BulkString (Some v, -1)))
           | _ -> failwith "Invalid input for set")
-      | _ -> failwith "Unsupported command")
+      | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
 
-let encode_redis_value config_data = function
+let rec encode_redis_value config_data = function
   | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
   | NullBulkString -> "$-1\r\n"
   | BulkString (None, _) -> "$-1\r\n"
-  | BulkString (Some str, _) -> (
-      match check_for_redis_command [ Some str ] config_data with
-      | Some s -> s
-      | None -> "$-1\r\n")
-  | SimpleString (None, _) -> "\r\n"
+  | BulkString (Some str, d) -> (
+      if d = -1 then create_bulk_string (Some str)
+      else
+        match check_for_redis_command [ Some str ] config_data with
+        | Some s -> encode_redis_value config_data s
+        | None -> "$-1\r\n")
+  | SimpleString (None, _) -> "$-1\r\n"
   | SimpleString (Some str, _) -> Printf.sprintf "+%s\r\n" str
-  | RedisArray (elems, _) -> (
-      match check_for_redis_command elems config_data with
-      | Some s -> s
-      | None -> create_array elems)
+  | RedisArray (elems, d) -> (
+      if d = -1 then create_array_of_bulk_string elems
+      else
+        match check_for_redis_command elems config_data with
+        | Some s -> encode_redis_value config_data s
+        | None -> create_array_of_bulk_string elems)
