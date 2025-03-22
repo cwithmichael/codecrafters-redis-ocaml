@@ -123,8 +123,8 @@ let check_for_redis_command input config_data =
               | "dbfilename" ->
                   let dbfilename = ConfigMap.find "dbfilename" config_data in
                   Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
-              | _ -> failwith "Invalid input for config")
-          | None -> failwith "")
+              | _ -> failwith @@ "Unknown sub command for config " ^ s)
+          | None -> failwith "Invalid input for config")
       | "set" -> (
           match
             ( List.nth_opt input 1,
@@ -152,7 +152,7 @@ let check_for_redis_command input config_data =
               match Hashtbl.find_opt dict key with
               | None -> Some NullBulkString
               | Some v -> Some (BulkString (v, -1)))
-          | _ -> failwith "Invalid input for set")
+          | _ -> failwith "Invalid input for get")
       | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
 
