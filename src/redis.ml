@@ -14,10 +14,10 @@ let read_until_crlf buf pos =
   aux pos
 
 type redis_value =
-  | BulkString of string option * int
-  | RedisArray of string option list * int
+  | BulkString of string * int
+  | RedisArray of string list * int
   | RedisInt of int * int
-  | SimpleString of string option * int
+  | SimpleString of string * int
   | NullBulkString
 
 let parse_int buf pos =
@@ -27,15 +27,15 @@ let parse_int buf pos =
 let parse_bulk_string buf pos =
   match parse_int buf pos with
   | RedisInt (len, next_pos) ->
-      if len = -1 then BulkString (None, next_pos)
+      if len = -1 then NullBulkString
       else
         let str = Bytes.sub_string buf next_pos len in
-        BulkString (Some str, next_pos + len + 2)
+        BulkString (str, next_pos + len + 2)
   | _ -> NullBulkString
 
 let parse_simple_string buf pos =
   let str, next_pos = read_until_crlf buf pos in
-  SimpleString (Some str, next_pos)
+  SimpleString (str, next_pos)
 
 let rec parse_array buf pos =
   match parse_int buf pos with
@@ -100,32 +100,29 @@ let create_bulk_string data =
 
 let create_array_of_bulk_string data =
   List.fold_left
-    (fun acc x -> acc ^ create_bulk_string x)
+    (fun acc x -> acc ^ create_bulk_string (Some x))
     (Printf.sprintf "*%d\r\n" (List.length data))
     data
 
 let check_for_redis_command input config_data =
-  match List.hd input with
+  match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
-      | "ping" -> Some (SimpleString (Some "PONG", 0))
+      | "ping" -> Some (SimpleString ("PONG", 0))
       | "echo" -> (
           match List.nth_opt input 1 with
-          | Some (Some s) -> Some (SimpleString (Some s, 0))
+          | Some s -> Some (SimpleString (s, 0))
           | _ -> failwith "Invalid input for echo")
       | "config" -> (
           match List.nth_opt input 2 with
-          | Some None -> failwith ""
-          | Some (Some s) -> (
+          | Some s -> (
               match String.lowercase_ascii s with
               | "dir" ->
-                  let dir = ConfigMap.find_opt "dir" config_data in
-                  Some (RedisArray ([ Some "dir"; dir ], -1))
+                  let dir = ConfigMap.find "dir" config_data in
+                  Some (RedisArray ([ "dir"; dir ], -1))
               | "dbfilename" ->
-                  let dbfilename =
-                    ConfigMap.find_opt "dbfilename" config_data
-                  in
-                  Some (RedisArray ([ Some "dbfilename"; dbfilename ], -1))
+                  let dbfilename = ConfigMap.find "dbfilename" config_data in
+                  Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
               | _ -> failwith "Invalid input for config")
           | None -> failwith "")
       | "set" -> (
@@ -135,27 +132,26 @@ let check_for_redis_command input config_data =
               List.nth_opt input 3,
               List.nth_opt input 4 )
           with
-          | Some (Some key), Some (Some value), None, None ->
+          | Some key, Some value, None, None ->
               update_dict key value;
-              Some (SimpleString (Some "OK", 0))
-          | Some (Some key), Some (Some value), Some sub_cmd, Some sub_cmd_val
-            ->
+              Some (SimpleString ("OK", 0))
+          | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
               (* only handle px for now*)
               update_dict key value;
               Lwt.ignore_result
-                (handle_set_sub sub_cmd
-                   (match Option.map float_of_string sub_cmd_val with
+                (handle_set_sub (Some sub_cmd)
+                   (match Option.map float_of_string (Some sub_cmd_val) with
                    | Some delay -> Some (delay /. 1000.0)
                    | None -> failwith "Invalid subcommand value")
                    key);
-              Some (SimpleString (Some "OK", 0))
+              Some (SimpleString ("OK", 0))
           | _ -> failwith "Invalid input for set")
       | "get" -> (
           match List.nth_opt input 1 with
-          | Some (Some key) -> (
+          | Some key -> (
               match Hashtbl.find_opt dict key with
               | None -> Some NullBulkString
-              | Some v -> Some (BulkString (Some v, -1)))
+              | Some v -> Some (BulkString (v, -1)))
           | _ -> failwith "Invalid input for set")
       | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
@@ -163,15 +159,13 @@ let check_for_redis_command input config_data =
 let rec encode_redis_value config_data = function
   | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
   | NullBulkString -> "$-1\r\n"
-  | BulkString (None, _) -> "$-1\r\n"
-  | BulkString (Some str, d) -> (
+  | BulkString (str, d) -> (
       if d = -1 then create_bulk_string (Some str)
       else
-        match check_for_redis_command [ Some str ] config_data with
+        match check_for_redis_command [ str ] config_data with
         | Some s -> encode_redis_value config_data s
         | None -> "$-1\r\n")
-  | SimpleString (None, _) -> "$-1\r\n"
-  | SimpleString (Some str, _) -> Printf.sprintf "+%s\r\n" str
+  | SimpleString (str, _) -> Printf.sprintf "+%s\r\n" str
   | RedisArray (elems, d) -> (
       if d = -1 then create_array_of_bulk_string elems
       else
