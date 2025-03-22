@@ -104,55 +104,65 @@ let create_array_of_bulk_string data =
     (Printf.sprintf "*%d\r\n" (List.length data))
     data
 
+let handle_ping = Some (SimpleString ("PONG", 0))
+
+let handle_echo input =
+  match List.nth_opt input 1 with
+  | Some s -> Some (SimpleString (s, 0))
+  | _ -> failwith "Invalid input for echo"
+
+let handle_config input config_data =
+  match List.nth_opt input 2 with
+  | Some s -> (
+      match String.lowercase_ascii s with
+      | "dir" ->
+          let dir = ConfigMap.find "dir" config_data in
+          Some (RedisArray ([ "dir"; dir ], -1))
+      | "dbfilename" ->
+          let dbfilename = ConfigMap.find "dbfilename" config_data in
+          Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
+      | _ -> failwith @@ "Unknown sub command for config " ^ s)
+  | None -> failwith "Invalid input for config"
+
+let handle_set input =
+  match
+    ( List.nth_opt input 1,
+      List.nth_opt input 2,
+      List.nth_opt input 3,
+      List.nth_opt input 4 )
+  with
+  | Some key, Some value, None, None ->
+      update_dict key value;
+      Some (SimpleString ("OK", 0))
+  | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
+      (* only handle px for now*)
+      update_dict key value;
+      Lwt.ignore_result
+        (handle_set_sub (Some sub_cmd)
+           (match Option.map float_of_string (Some sub_cmd_val) with
+           | Some delay -> Some (delay /. 1000.0)
+           | None -> failwith "Invalid subcommand value")
+           key);
+      Some (SimpleString ("OK", 0))
+  | _ -> failwith "Invalid input for set"
+
+let handle_get input =
+  match List.nth_opt input 1 with
+  | Some key -> (
+      match Hashtbl.find_opt dict key with
+      | None -> Some NullBulkString
+      | Some v -> Some (BulkString (v, -1)))
+  | _ -> failwith "Invalid input for get"
+
 let check_for_redis_command input config_data =
   match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
-      | "ping" -> Some (SimpleString ("PONG", 0))
-      | "echo" -> (
-          match List.nth_opt input 1 with
-          | Some s -> Some (SimpleString (s, 0))
-          | _ -> failwith "Invalid input for echo")
-      | "config" -> (
-          match List.nth_opt input 2 with
-          | Some s -> (
-              match String.lowercase_ascii s with
-              | "dir" ->
-                  let dir = ConfigMap.find "dir" config_data in
-                  Some (RedisArray ([ "dir"; dir ], -1))
-              | "dbfilename" ->
-                  let dbfilename = ConfigMap.find "dbfilename" config_data in
-                  Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
-              | _ -> failwith @@ "Unknown sub command for config " ^ s)
-          | None -> failwith "Invalid input for config")
-      | "set" -> (
-          match
-            ( List.nth_opt input 1,
-              List.nth_opt input 2,
-              List.nth_opt input 3,
-              List.nth_opt input 4 )
-          with
-          | Some key, Some value, None, None ->
-              update_dict key value;
-              Some (SimpleString ("OK", 0))
-          | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
-              (* only handle px for now*)
-              update_dict key value;
-              Lwt.ignore_result
-                (handle_set_sub (Some sub_cmd)
-                   (match Option.map float_of_string (Some sub_cmd_val) with
-                   | Some delay -> Some (delay /. 1000.0)
-                   | None -> failwith "Invalid subcommand value")
-                   key);
-              Some (SimpleString ("OK", 0))
-          | _ -> failwith "Invalid input for set")
-      | "get" -> (
-          match List.nth_opt input 1 with
-          | Some key -> (
-              match Hashtbl.find_opt dict key with
-              | None -> Some NullBulkString
-              | Some v -> Some (BulkString (v, -1)))
-          | _ -> failwith "Invalid input for get")
+      | "ping" -> handle_ping
+      | "echo" -> handle_echo input
+      | "config" -> handle_config input config_data
+      | "set" -> handle_set input
+      | "get" -> handle_get input
       | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
 
