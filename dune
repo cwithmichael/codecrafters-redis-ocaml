@@ -2,4 +2,6 @@
 
 (executable
  (name main)
- (libraries unix lwt lwt.unix))
+ (libraries unix lwt lwt_ppx lwt.unix)
+ (preprocess
+  (pps lwt_ppx)))
