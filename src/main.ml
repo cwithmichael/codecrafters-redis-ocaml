@@ -45,64 +45,72 @@ let speclist =
     ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
   ]
 
-let read_file_to_string file =
-  let ic =
-    try open_in_bin file
-    with Sys_error msg -> failwith ("Cannot open file: " ^ msg)
-  in
-  let len = in_channel_length ic in
-  let buf = really_input_string ic len in
-  close_in ic;
-  buf
-
-let char_to_hex c =
-  let byte_value = Char.code c in
-  Printf.sprintf "%02x" byte_value
-
 let process_kv filename =
-  let kv = ref "" in
-  let binary_string = read_file_to_string filename in
+  let keys = ref "" in
+  let values = ref "" in
+  let binary_string = Util.read_file_to_string filename in
   let* () =
     Lwt_list.iteri_s
       (fun idx c ->
-        let hex = char_to_hex c in
+        let hex = Util.char_to_hex c in
         let next_hex =
           if idx + 1 < String.length binary_string then
-            char_to_hex (String.get binary_string (idx + 1))
+            Util.char_to_hex (String.get binary_string (idx + 1))
           else ""
         in
-        if hex = "00" then (
+        if hex = "00" then
           match int_of_string_opt ("0x" ^ next_hex) with
           | Some len ->
               if
                 len > 0
                 && len < String.length binary_string
                 && idx + 2 < String.length binary_string
-              then kv := !kv ^ String.sub binary_string (idx + 2) len ^ "\t";
-              Lwt.return ()
-          | None ->
-              kv := !kv ^ " " ^ next_hex;
-              Lwt.return ())
+              (* clean this up with refactor *)
+              then (
+                keys := !keys ^ String.sub binary_string (idx + 2) len ^ "\t";
+                match
+                  int_of_string_opt
+                    ("0x"
+                    ^ Util.char_to_hex
+                        (String.get binary_string (idx + 2 + len)))
+                with
+                | Some vlen ->
+                    values :=
+                      !values
+                      ^ String.sub binary_string (idx + 2 + len + 1) vlen
+                      ^ "\t";
+                    Lwt.return ()
+                | None -> Lwt.return ())
+              else Lwt.return ()
+          | None -> Lwt.return ()
         else Lwt.return ())
       (String.to_seq binary_string |> List.of_seq)
   in
-  Lwt.return !kv
+  Lwt.return (!keys, !values)
 
 let main () =
   Arg.parse speclist (fun _ -> ()) "";
-  let* kv =
+  let* keys, values =
     try%lwt process_kv (!dir ^ "/" ^ !dbfilename)
     with exn ->
       let msg =
         Printf.sprintf "Error processing KV file: %s\n" (Printexc.to_string exn)
       in
-      Lwt.return msg
+      Lwt.return ("", msg)
   in
-  let* () = Lwt_io.printf "kv: %s" kv in
+  let* () = Lwt_io.printf "kv: %s %s" keys values in
   let m =
     ConfigMap.(
-      empty |> add "dir" !dir |> add "dbfilename" !dbfilename |> add "kv" kv)
+      empty |> add "dir" !dir
+      |> add "dbfilename" !dbfilename
+      |> add "keys" keys |> add "values" values)
   in
+
+  let keys = String.split_on_char '\t' keys |> Util.filter_empty_strings in
+  let values = String.split_on_char '\t' values |> Util.filter_empty_strings in
+  List.iteri
+    (fun i k -> ignore @@ Redis.handle_set [ ""; k; List.nth values i ])
+    keys;
   start_server !port m
 
 let () = Lwt_main.run (main ())

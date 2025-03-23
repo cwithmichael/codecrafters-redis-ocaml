@@ -100,9 +100,6 @@ let create_bulk_string data =
       if String.length str < 1 then ""
       else Printf.sprintf "$%d\r\n%s\r\n" (String.length str) str
 
-let filter_empty_strings strings =
-  List.filter (fun s -> String.trim s <> "") strings
-
 let create_array_of_bulk_string data =
   List.fold_left
     (fun acc x -> acc ^ create_bulk_string (Some x))
@@ -169,10 +166,12 @@ let check_for_redis_command input config_data =
       | "set" -> handle_set input
       | "get" -> handle_get input
       | "keys" -> (
-          match ConfigMap.find_opt "kv" config_data with
+          match ConfigMap.find_opt "keys" config_data with
           | Some s ->
-              let ls = String.split_on_char '\t' s |> filter_empty_strings in
-              Some (RedisArray (ls, -1))
+              let keys =
+                String.split_on_char '\t' s |> Util.filter_empty_strings
+              in
+              Some (RedisArray (keys, -1))
           | None -> Some NullBulkString)
       | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
