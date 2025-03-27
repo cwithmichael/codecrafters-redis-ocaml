@@ -45,72 +45,141 @@ let speclist =
     ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
   ]
 
-let process_kv filename =
-  let keys = ref "" in
-  let values = ref "" in
-  let binary_string = Util.read_file_to_string filename in
-  let* () =
-    Lwt_list.iteri_s
-      (fun idx c ->
-        let hex = Util.char_to_hex c in
-        let next_hex =
-          if idx + 1 < String.length binary_string then
-            Util.char_to_hex (String.get binary_string (idx + 1))
-          else ""
-        in
-        if hex = "00" then
-          match int_of_string_opt ("0x" ^ next_hex) with
-          | Some len ->
-              if
-                len > 0
-                && len < String.length binary_string
-                && idx + 2 < String.length binary_string
-              (* clean this up with refactor *)
-              then (
-                keys := !keys ^ String.sub binary_string (idx + 2) len ^ "\t";
-                match
-                  int_of_string_opt
-                    ("0x"
-                    ^ Util.char_to_hex
-                        (String.get binary_string (idx + 2 + len)))
-                with
-                | Some vlen ->
-                    values :=
-                      !values
-                      ^ String.sub binary_string (idx + 2 + len + 1) vlen
-                      ^ "\t";
-                    Lwt.return ()
-                | None -> Lwt.return ())
-              else Lwt.return ()
-          | None -> Lwt.return ()
-        else Lwt.return ())
-      (String.to_seq binary_string |> List.of_seq)
+let decode_length data pos =
+  let b = int_of_char @@ Bytes.get data pos in
+  let flag = (b land 0xc0) lsr 6 in
+  let six_bits = b land 0x3f in
+  Printf.printf "idx: %d b:%d flag: %d six: %d\n" pos b flag six_bits;
+
+  match flag with
+  | 0 -> (six_bits, 0)
+  | 1 ->
+      let next_b = Char.code @@ Bytes.get data (pos + 1) in
+      ((six_bits lsl 8) lor next_b, 1)
+  | 2 -> (Int32.to_int (Bytes.get_int32_le data (pos + 1)), 4)
+  | 3 -> (six_bits, 1)
+  | _ ->
+      failwith (Printf.sprintf "data:%s\n pos: %d" (Bytes.to_string data) pos)
+
+let decode_int data pos =
+  let b = int_of_char @@ Bytes.get data pos in
+  let flag = (b land 0xc0) lsr 6 in
+  Printf.printf "decoding int with flag: %d\n" flag;
+  let decoded_value =
+    match flag with
+    | 0 -> 1
+    | 1 -> 2
+    | 2 -> 4
+    | _ ->
+        failwith (Printf.sprintf "Invalid integer encoding at position %d" pos)
   in
-  Lwt.return (!keys, !values)
+  (decoded_value, pos + decoded_value)
+
+let get_kv data idx keys values timestamp =
+  try
+    let kl, skip1 = decode_length data !idx in
+    let key_start = !idx + skip1 in
+    let key = Bytes.sub data (key_start + 1) kl in
+    let vl, skip2 = decode_length data (!idx + 1 + kl) in
+    let val_start = !idx + kl + skip1 + skip2 + 1 in
+    Printf.printf
+      "Before: idx: %d kl:%d skip1: %d key_st: %d vl:%d skip2:%d val_start:%d\n"
+      !idx kl skip1 key_start vl skip2 val_start;
+    let value = Bytes.sub data (val_start + 1) vl in
+    idx := !idx + kl + vl + 2;
+    keys := key :: !keys;
+    values := value :: !values;
+    Printf.printf "KEY: %s VALUE: %s\n" (String.of_bytes key)
+      (String.of_bytes value);
+    Printf.printf "After: idx: %d \n\n" !idx;
+    let timestamp = match timestamp with Some t -> t | None -> 0L in
+    (key, value, timestamp)
+  with exn ->
+    Printf.eprintf "Error processing KV: %s\n" (Printexc.to_string exn);
+    (Bytes.of_string "", Bytes.of_string "", 0L)
+
+let parse_redis_rdb filename =
+  let data = Util.read_file_to_string filename |> Bytes.of_string in
+  let idx = ref 0 in
+  let keys = ref [] in
+  let values = ref [] in
+  let timestamps = ref [] in
+  let result = ref [] in
+  let new_db = ref false in
+  while !idx < Bytes.length data do
+    let opcode = Bytes.get data !idx in
+    match opcode with
+    | '\xFF' ->
+        (* End of file *)
+        new_db := false;
+        idx := Bytes.length data
+    | '\xFA' ->
+        idx := !idx + 1;
+        ignore @@ get_kv data idx keys values None
+    | '\xFB' ->
+        idx := !idx + 1;
+        let _, new_pos = decode_int data !idx in
+        idx := new_pos;
+        let _, new_pos = decode_int data !idx in
+        idx := new_pos;
+        idx := !idx + 1;
+        Printf.printf "New pos: %d\n" !idx;
+        new_db := true
+    | '\xFC' ->
+        (* Expiry timestamp *)
+        idx := !idx + 1;
+        let ts = Bytes.get_int64_le data !idx in
+        timestamps := ts :: !timestamps;
+        idx := !idx + 8;
+        let key, value, timestamp = get_kv data idx keys values (Some ts) in
+        result := (key, value, timestamp) :: !result
+    | '\xFE' ->
+        idx := !idx + 1;
+        let _, new_pos = decode_int data !idx in
+        idx := new_pos
+    | _ ->
+        if !new_db = true then (
+          let key, value, timestamp = get_kv data idx keys values None in
+          if key <> Bytes.of_string "" then
+            result := (key, value, timestamp) :: !result;
+          idx := !idx + 1)
+        else
+          (* Unknown opcode, skip *)
+          idx := !idx + 1
+  done;
+  !result
 
 let main () =
-  Arg.parse speclist (fun _ -> ()) "";
-  let* keys, values =
-    try%lwt process_kv (!dir ^ "/" ^ !dbfilename)
-    with exn ->
-      let msg =
-        Printf.sprintf "Error processing KV file: %s\n" (Printexc.to_string exn)
-      in
-      Lwt.return ("", msg)
+  Arg.parse speclist (fun x -> Printf.printf "%s" x) "";
+
+  let pairs =
+    if !dbfilename <> "" then
+      try parse_redis_rdb (!dir ^ "/" ^ !dbfilename) with _exn -> []
+    else []
   in
-  let* () = Lwt_io.printf "kv: %s %s" keys values in
+  let keys =
+    List.fold_left
+      (fun acc (k, _, _) -> (String.of_bytes k |> String.trim) ^ "\t" ^ acc)
+      "" pairs
+  in
+  let values =
+    List.fold_left
+      (fun acc (_, v, _) -> (String.of_bytes v |> String.trim) ^ " " ^ acc)
+      "" pairs
+  in
   let m =
     ConfigMap.(
       empty |> add "dir" !dir
       |> add "dbfilename" !dbfilename
       |> add "keys" keys |> add "values" values)
   in
-
-  let keys = String.split_on_char '\t' keys |> Util.filter_empty_strings in
-  let values = String.split_on_char '\t' values |> Util.filter_empty_strings in
-  List.iteri
-    (fun i k -> ignore @@ Redis.handle_set [ ""; k; List.nth values i ])
-    keys;
+  List.iter
+    (fun (k, v, exp) ->
+      let k = Bytes.to_string k in
+      let v = Bytes.to_string v in
+      if exp <= 0L then ignore @@ Redis.handle_set [ ""; k; v ]
+      else ignore @@ Redis.handle_set [ ""; k; v; "PX"; Int64.to_string exp ])
+    pairs;
   start_server !port m
 
 let () = Lwt_main.run (main ())

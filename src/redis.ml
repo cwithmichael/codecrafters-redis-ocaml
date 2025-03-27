@@ -83,13 +83,19 @@ let handle_set_sub cmd v key =
       (*only handle px for now*)
       match v with
       | Some delay ->
-          delay_execution
-            (fun () ->
-              Mutex.lock dict_mutex;
-              Hashtbl.remove dict key;
-              Mutex.unlock dict_mutex;
-              Lwt.return ())
-            delay
+          if delay < Unix.gettimeofday () then
+            delay_execution
+              (fun () ->
+                Mutex.lock dict_mutex;
+                Hashtbl.remove dict key;
+                Mutex.unlock dict_mutex;
+                Lwt.return ())
+              delay
+          else (
+            Mutex.lock dict_mutex;
+            Hashtbl.remove dict key;
+            Mutex.unlock dict_mutex;
+            Lwt.return ())
       | None -> Lwt.return_unit)
   | None -> failwith "Unsupported subcommand"
 

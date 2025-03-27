@@ -14,3 +14,20 @@ let char_to_hex c =
 
 let filter_empty_strings strings =
   List.filter (fun s -> String.trim s <> "") strings
+
+let xs_to_string xs =
+  List.fold_left
+    (fun acc x ->
+      let k, v, exp = x in
+      let exp = Int64.to_float exp /. 1000. in
+      let k = Bytes.to_string k in
+      let v = Bytes.to_string v in
+      let time_str =
+        Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d"
+          (1900 + (Unix.localtime exp).Unix.tm_year)
+          ((Unix.localtime exp).Unix.tm_mon + 1)
+          (Unix.localtime exp).Unix.tm_mday (Unix.localtime exp).Unix.tm_hour
+          (Unix.localtime exp).Unix.tm_min (Unix.localtime exp).Unix.tm_sec
+      in
+      " (" ^ k ^ ") : " ^ v ^ " : " ^ time_str ^ acc)
+    " " xs
