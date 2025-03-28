@@ -44,16 +44,6 @@ let speclist =
     ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
   ]
 
-let _decode_int six_bits =
-  Printf.printf "Decoding int: %d\n" six_bits;
-  match six_bits with
-  | 0 -> 1
-  | 1 -> 2
-  | 2 -> 1
-  | _ ->
-      failwith
-        (Printf.sprintf "Invalid integer encoding at position %d" six_bits)
-
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
   let flag = (b land 0xc0) lsr 6 in
@@ -121,9 +111,6 @@ let parse_redis_rdb filename =
         (* Expiry timestamp *)
         idx := !idx + 1;
         let ts = Bytes.get_int64_le data !idx in
-        (*let ptime_ts = Option.get @@ Ptime.of_float_s (Int64.to_float ts) in
-        let y, m, d = Ptime.to_date ptime_ts in
-        ignore @@ failwith @@ Printf.sprintf "%d %d %d" m y d;*)
         timestamps := ts :: !timestamps;
         idx := !idx + 9;
         Printf.printf "get_kv %d from: %s with timestamp: %Ld\n" !idx "FC|FD" ts;
