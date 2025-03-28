@@ -73,8 +73,13 @@ let update_dict key value =
   Hashtbl.add dict key value;
   Mutex.unlock dict_mutex
 
+let delete_from_dict key =
+  Mutex.lock dict_mutex;
+  Hashtbl.remove dict key;
+  Mutex.unlock dict_mutex
+
 let delay_execution f timeout =
-  let* () = Lwt_unix.sleep timeout in
+  let* () = Lwt_unix.sleep @@ timeout in
   f ()
 
 let handle_set_sub cmd v key =
@@ -83,19 +88,20 @@ let handle_set_sub cmd v key =
       (*only handle px for now*)
       match v with
       | Some delay ->
-          if delay < Unix.gettimeofday () then
+          let* () = Lwt_io.printf "Scheduled to remove %s : %f\n" key delay in
+          let delay = delay /. 1000. in
+          let tm = Unix.gmtime delay in
+          let cur_tm = Unix.gmtime (Unix.time ()) in
+          (* figure out a better check than this smh *)
+          if delay > 100000. && tm.tm_year < cur_tm.tm_year then (
+            delete_from_dict key;
+            Lwt.return ())
+          else
             delay_execution
               (fun () ->
-                Mutex.lock dict_mutex;
-                Hashtbl.remove dict key;
-                Mutex.unlock dict_mutex;
+                delete_from_dict key;
                 Lwt.return ())
               delay
-          else (
-            Mutex.lock dict_mutex;
-            Hashtbl.remove dict key;
-            Mutex.unlock dict_mutex;
-            Lwt.return ())
       | None -> Lwt.return_unit)
   | None -> failwith "Unsupported subcommand"
 
@@ -145,12 +151,8 @@ let handle_set input =
   | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
       (* only handle px for now*)
       update_dict key value;
-      Lwt.ignore_result
-        (handle_set_sub (Some sub_cmd)
-           (match Option.map float_of_string (Some sub_cmd_val) with
-           | Some delay -> Some (delay /. 1000.0)
-           | None -> failwith "Invalid subcommand value")
-           key);
+      let x = sub_cmd_val |> Int64.of_string |> Int64.to_float in
+      Lwt.ignore_result (handle_set_sub (Some sub_cmd) (Some x) key);
       Some (SimpleString ("OK", 0))
   | _ -> failwith "Invalid input for set"
 

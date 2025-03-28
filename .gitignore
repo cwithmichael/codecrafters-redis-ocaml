@@ -27,3 +27,9 @@ setup.log
 
 # Local OPAM switch
 _opam/
+
+*.rdb
+dump.txt
+.clj-kondo/
+.lsp/
+output.bin

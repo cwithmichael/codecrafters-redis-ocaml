@@ -10,9 +10,9 @@ let handle_client (input, output) config_data =
     | 0 -> Lwt_io.printl "Client disconnected"
     | size ->
         let res = Redis.parse_redis_input (Bytes.sub buf 0 size) 0 in
-        let* () =
-          Lwt_io.write output (Redis.encode_redis_value config_data res)
-        in
+        let encoded_result = Redis.encode_redis_value config_data res in
+        let* () = Lwt_io.printf "Encoded: %s" encoded_result in
+        let* () = Lwt_io.write output encoded_result in
         handle_command ()
   in
   handle_command ()
@@ -27,7 +27,6 @@ let rec accept_connections server_socket config_data =
 let start_server port config_data =
   let sockaddr = Unix.(ADDR_INET (inet_addr_any, port)) in
   let server_socket = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-
   Lwt_unix.setsockopt server_socket Unix.SO_REUSEADDR true;
   let* () = Lwt_unix.bind server_socket sockaddr in
   Lwt_unix.listen server_socket 10;
@@ -45,39 +44,35 @@ let speclist =
     ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
   ]
 
+let _decode_int six_bits =
+  Printf.printf "Decoding int: %d\n" six_bits;
+  match six_bits with
+  | 0 -> 1
+  | 1 -> 2
+  | 2 -> 1
+  | _ ->
+      failwith
+        (Printf.sprintf "Invalid integer encoding at position %d" six_bits)
+
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
   let flag = (b land 0xc0) lsr 6 in
   let six_bits = b land 0x3f in
   Printf.printf "idx: %d b:%d flag: %d six: %d\n" pos b flag six_bits;
-
   match flag with
   | 0 -> (six_bits, 0)
   | 1 ->
-      let next_b = Char.code @@ Bytes.get data (pos + 1) in
+      let next_b = int_of_char @@ Bytes.get data (pos + 1) in
       ((six_bits lsl 8) lor next_b, 1)
-  | 2 -> (Int32.to_int (Bytes.get_int32_le data (pos + 1)), 4)
-  | 3 -> (six_bits, 1)
+  | 2 -> (Int32.to_int (Bytes.get_int32_le data (pos + 1)), 3)
+  | 3 -> (six_bits, 01)
   | _ ->
       failwith (Printf.sprintf "data:%s\n pos: %d" (Bytes.to_string data) pos)
-
-let decode_int data pos =
-  let b = int_of_char @@ Bytes.get data pos in
-  let flag = (b land 0xc0) lsr 6 in
-  Printf.printf "decoding int with flag: %d\n" flag;
-  let decoded_value =
-    match flag with
-    | 0 -> 1
-    | 1 -> 2
-    | 2 -> 4
-    | _ ->
-        failwith (Printf.sprintf "Invalid integer encoding at position %d" pos)
-  in
-  (decoded_value, pos + decoded_value)
 
 let get_kv data idx keys values timestamp =
   try
     let kl, skip1 = decode_length data !idx in
+    Printf.printf "Decoding from get_kv idx: %d kl: %d skip: %d\n" !idx kl skip1;
     let key_start = !idx + skip1 in
     let key = Bytes.sub data (key_start + 1) kl in
     let vl, skip2 = decode_length data (!idx + 1 + kl) in
@@ -100,71 +95,76 @@ let get_kv data idx keys values timestamp =
 
 let parse_redis_rdb filename =
   let data = Util.read_file_to_string filename |> Bytes.of_string in
-  let idx = ref 0 in
+  let idx = ref 9 in
   let keys = ref [] in
   let values = ref [] in
   let timestamps = ref [] in
   let result = ref [] in
-  let new_db = ref false in
+  let inside_db = ref false in
   while !idx < Bytes.length data do
     let opcode = Bytes.get data !idx in
     match opcode with
     | '\xFF' ->
         (* End of file *)
-        new_db := false;
         idx := Bytes.length data
     | '\xFA' ->
         idx := !idx + 1;
         ignore @@ get_kv data idx keys values None
     | '\xFB' ->
         idx := !idx + 1;
-        let _, new_pos = decode_int data !idx in
-        idx := new_pos;
-        let _, new_pos = decode_int data !idx in
-        idx := new_pos;
-        idx := !idx + 1;
-        Printf.printf "New pos: %d\n" !idx;
-        new_db := true
-    | '\xFC' ->
+        let len = int_of_char @@ Bytes.get data !idx in
+        let exp = int_of_char @@ Bytes.get data (!idx + 1) in
+        Printf.printf "Keys: %d\n Exps: %d\n" len exp;
+        idx := !idx + 2;
+        inside_db := true
+    | '\xFC' | '\xFD' ->
         (* Expiry timestamp *)
         idx := !idx + 1;
         let ts = Bytes.get_int64_le data !idx in
+        (*let ptime_ts = Option.get @@ Ptime.of_float_s (Int64.to_float ts) in
+        let y, m, d = Ptime.to_date ptime_ts in
+        ignore @@ failwith @@ Printf.sprintf "%d %d %d" m y d;*)
         timestamps := ts :: !timestamps;
-        idx := !idx + 8;
+        idx := !idx + 9;
+        Printf.printf "get_kv %d from: %s with timestamp: %Ld\n" !idx "FC|FD" ts;
         let key, value, timestamp = get_kv data idx keys values (Some ts) in
         result := (key, value, timestamp) :: !result
     | '\xFE' ->
         idx := !idx + 1;
-        let _, new_pos = decode_int data !idx in
-        idx := new_pos
-    | _ ->
-        if !new_db = true then (
+        Printf.printf "decoding idx %d from: %s\n" !idx "FE";
+        let l, skip = decode_length data !idx in
+        idx := !idx + l + skip
+    | s ->
+        Printf.printf "Inside db: %b" !inside_db;
+        if !inside_db = true then (
+          idx := !idx + 1;
+          Printf.printf "get_kv %d from: %s\n" !idx "Unknown";
           let key, value, timestamp = get_kv data idx keys values None in
-          if key <> Bytes.of_string "" then
-            result := (key, value, timestamp) :: !result;
-          idx := !idx + 1)
-        else
+          result := (key, value, timestamp) :: !result)
+        else (
           (* Unknown opcode, skip *)
-          idx := !idx + 1
+          Printf.printf "Unknown opcode: %s\n" @@ Char.escaped s;
+          idx := !idx + 1)
   done;
   !result
 
 let main () =
   Arg.parse speclist (fun x -> Printf.printf "%s" x) "";
-
   let pairs =
-    if !dbfilename <> "" then
+    if !dir <> "" && !dbfilename <> "" then
       try parse_redis_rdb (!dir ^ "/" ^ !dbfilename) with _exn -> []
     else []
   in
+  (*let pairs = parse_redis_rdb (!dir ^ "/" ^ !dbfilename) in*)
   let keys =
     List.fold_left
       (fun acc (k, _, _) -> (String.of_bytes k |> String.trim) ^ "\t" ^ acc)
       "" pairs
   in
+  (*ignore @@ failwith keys;*)
   let values =
     List.fold_left
-      (fun acc (_, v, _) -> (String.of_bytes v |> String.trim) ^ " " ^ acc)
+      (fun acc (_, v, _) -> (String.of_bytes v |> String.trim) ^ "\t" ^ acc)
       "" pairs
   in
   let m =
@@ -177,6 +177,7 @@ let main () =
     (fun (k, v, exp) ->
       let k = Bytes.to_string k in
       let v = Bytes.to_string v in
+      Printf.printf "%s : %s : %Lu \n" k v exp;
       if exp <= 0L then ignore @@ Redis.handle_set [ ""; k; v ]
       else ignore @@ Redis.handle_set [ ""; k; v; "PX"; Int64.to_string exp ])
     pairs;
