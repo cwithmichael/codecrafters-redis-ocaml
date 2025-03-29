@@ -161,6 +161,11 @@ let handle_replica_conn replicaof m =
         (Redis.RedisArray ([ "REPLCONF"; "capa"; "psync2" ], -1))
     in
     let* () = Lwt_io.write out message in
+    let* _ = Lwt_io.read_line inp in
+    let message =
+      Redis.encode_redis_value m (Redis.RedisArray ([ "PSYNC"; "?"; "-1" ], -1))
+    in
+    let* () = Lwt_io.write out message in
     let* response = Lwt_io.read_line inp in
     let* () = Lwt_io.printlf "Server replied: %s" response in
     Lwt.return_unit
