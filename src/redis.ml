@@ -164,15 +164,18 @@ let handle_get input =
       | Some v -> Some (BulkString (v, -1)))
   | _ -> failwith "Invalid input for get"
 
-let handle_info _ =
-  let info_data = "role:master" in
-  Some (BulkString (info_data, -1))
+let handle_info _ config_data =
+  match ConfigMap.find "replicaof" config_data with
+  | "" ->
+      let info_data = "role:master" in
+      Some (BulkString (info_data, -1))
+  | _ -> Some (BulkString ("role:slave", -1))
 
 let check_for_redis_command input config_data =
   match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
-      | "info" -> handle_info input
+      | "info" -> handle_info input config_data
       | "ping" -> handle_ping
       | "echo" -> handle_echo input
       | "config" -> handle_config input config_data

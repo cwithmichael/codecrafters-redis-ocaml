@@ -33,17 +33,6 @@ let start_server port config_data =
   let* () = Lwt_io.printlf "Server started on port %d" port in
   accept_connections server_socket config_data
 
-let dir = ref ""
-let dbfilename = ref ""
-let port = ref 6379
-
-let speclist =
-  [
-    ("--port", Arg.Set_int port, "Set port");
-    ("--dir", Arg.Set_string dir, "Output dir");
-    ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
-  ]
-
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
   let flag = (b land 0xc0) lsr 6 in
@@ -136,6 +125,18 @@ let parse_redis_rdb filename =
   !result
 
 let main () =
+  let dir = ref "" in
+  let dbfilename = ref "" in
+  let port = ref 6379 in
+  let replicaof = ref "" in
+  let speclist =
+    [
+      ("--replicaof", Arg.Set_string replicaof, "Set replicaof");
+      ("--port", Arg.Set_int port, "Set port");
+      ("--dir", Arg.Set_string dir, "Output dir");
+      ("--dbfilename", Arg.Set_string dbfilename, "Set db output file name");
+    ]
+  in
   Arg.parse speclist (fun x -> Printf.printf "%s" x) "";
   let pairs =
     if !dir <> "" && !dbfilename <> "" then
@@ -158,7 +159,7 @@ let main () =
     ConfigMap.(
       empty |> add "dir" !dir
       |> add "dbfilename" !dbfilename
-      |> add "keys" keys |> add "values" values)
+      |> add "keys" keys |> add "values" values |> add "replicaof" !replicaof)
   in
   List.iter
     (fun (k, v, exp) ->
