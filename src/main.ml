@@ -147,6 +147,20 @@ let handle_replica_conn replicaof m =
     in
     let* inp, out = create_client (List.hd addr) (List.nth addr 1) in
     let* () = Lwt_io.write out message in
+    let* _ = Lwt_io.read_line inp in
+    let message =
+      Redis.encode_redis_value m
+        (Redis.RedisArray
+           ( [ "REPLCONF"; "listening-port"; List.hd @@ ConfigMap.find "port" m ],
+             -1 ))
+    in
+    let* () = Lwt_io.write out message in
+    let* _ = Lwt_io.read_line inp in
+    let message =
+      Redis.encode_redis_value m
+        (Redis.RedisArray ([ "REPLCONF"; "capa"; "psync2" ], -1))
+    in
+    let* () = Lwt_io.write out message in
     let* response = Lwt_io.read_line inp in
     let* () = Lwt_io.printlf "Server replied: %s" response in
     Lwt.return_unit
@@ -183,6 +197,7 @@ let main () =
   let m =
     ConfigMap.(
       empty |> add "dir" [ !dir ]
+      |> add "port" [ string_of_int !port ]
       |> add "dbfilename" [ !dbfilename ]
       |> add "keys" keys |> add "values" values
       |> add "replicaof" [ !replicaof ])
