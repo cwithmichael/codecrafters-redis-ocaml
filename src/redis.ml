@@ -176,10 +176,13 @@ let handle_info _ config_data =
       Some (BulkString (info_data, -1))
   | _ -> Some (BulkString ("role:slave", -1))
 
+let handle_replconf _ _config_data = Some (SimpleString ("OK", -1))
+
 let check_for_redis_command input config_data =
   match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
+      | "replconf" -> handle_replconf input config_data
       | "info" -> handle_info input config_data
       | "ping" -> handle_ping
       | "echo" -> handle_echo input
