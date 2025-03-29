@@ -9,10 +9,26 @@ let handle_client (input, output) config_data =
     match n with
     | 0 -> Lwt_io.printl "Client disconnected"
     | size ->
-        let res = Redis.parse_redis_input (Bytes.sub buf 0 size) 0 in
-        let encoded_result = Redis.encode_redis_value config_data res in
+        let input = Redis.parse_redis_input (Bytes.sub buf 0 size) 0 in
+        let encoded_result = Redis.encode_redis_value config_data input in
         let* () = Lwt_io.printf "Encoded: %s" encoded_result in
         let* () = Lwt_io.write output encoded_result in
+        let _ =
+          match input with
+          | RedisArray (str :: _, _) ->
+              let* () = Lwt_io.printf "InputString: %s\n" str in
+              if String.lowercase_ascii str = "psync" then
+                let empty_rdb =
+                  Base64.decode_exn
+                    "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
+                in
+                let rdb_string =
+                  Printf.sprintf "$%d\r\n%s" (String.length empty_rdb) empty_rdb
+                in
+                Lwt_io.write output rdb_string
+              else Lwt.return_unit
+          | _ -> Lwt.return_unit
+        in
         handle_command ()
   in
   handle_command ()

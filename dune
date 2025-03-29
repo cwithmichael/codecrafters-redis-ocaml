@@ -2,6 +2,6 @@
 
 (executable
  (name main)
- (libraries unix lwt lwt_ppx lwt.unix ptime)
+ (libraries base64 unix lwt lwt_ppx lwt.unix ptime)
  (preprocess
   (pps lwt_ppx)))
