@@ -164,10 +164,15 @@ let handle_get input =
       | Some v -> Some (BulkString (v, -1)))
   | _ -> failwith "Invalid input for get"
 
+let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+
 let handle_info _ config_data =
   match ConfigMap.find "replicaof" config_data with
   | "" ->
-      let info_data = "role:master" in
+      let info_data =
+        Printf.sprintf "role:master\r\nmaster_replid:%s\r\nmaster_repl_offset:0"
+          repl_id
+      in
       Some (BulkString (info_data, -1))
   | _ -> Some (BulkString ("role:slave", -1))
 
