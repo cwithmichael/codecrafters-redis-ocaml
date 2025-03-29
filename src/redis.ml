@@ -164,10 +164,15 @@ let handle_get input =
       | Some v -> Some (BulkString (v, -1)))
   | _ -> failwith "Invalid input for get"
 
+let handle_info _ =
+  let info_data = "role:master" in
+  Some (BulkString (info_data, -1))
+
 let check_for_redis_command input config_data =
   match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
+      | "info" -> handle_info input
       | "ping" -> handle_ping
       | "echo" -> handle_echo input
       | "config" -> handle_config input config_data
