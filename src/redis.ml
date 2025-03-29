@@ -130,10 +130,10 @@ let handle_config input config_data =
   | Some s -> (
       match String.lowercase_ascii s with
       | "dir" ->
-          let dir = ConfigMap.find "dir" config_data in
+          let dir = List.hd @@ ConfigMap.find "dir" config_data in
           Some (RedisArray ([ "dir"; dir ], -1))
       | "dbfilename" ->
-          let dbfilename = ConfigMap.find "dbfilename" config_data in
+          let dbfilename = List.hd @@ ConfigMap.find "dbfilename" config_data in
           Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
       | _ -> failwith @@ "Unknown sub command for config " ^ s)
   | None -> failwith "Invalid input for config"
@@ -168,7 +168,7 @@ let repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
 
 let handle_info _ config_data =
   match ConfigMap.find "replicaof" config_data with
-  | "" ->
+  | [ "" ] ->
       let info_data =
         Printf.sprintf "role:master\r\nmaster_replid:%s\r\nmaster_repl_offset:0"
           repl_id
@@ -188,10 +188,8 @@ let check_for_redis_command input config_data =
       | "get" -> handle_get input
       | "keys" -> (
           match ConfigMap.find_opt "keys" config_data with
-          | Some s ->
-              let keys =
-                String.split_on_char '\t' s |> Util.filter_empty_strings
-              in
+          | Some keys ->
+              let keys = keys |> Util.filter_empty_strings in
               Some (RedisArray (keys, -1))
           | None -> Some NullBulkString)
       | _ -> failwith @@ "Unsupported command " ^ cmd)

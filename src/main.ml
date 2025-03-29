@@ -33,6 +33,21 @@ let start_server port config_data =
   let* () = Lwt_io.printlf "Server started on port %d" port in
   accept_connections server_socket config_data
 
+let create_client host port =
+  let* addr_info =
+    Lwt_unix.getaddrinfo host port [ Unix.(AI_FAMILY PF_INET) ]
+  in
+  let* sockaddr =
+    match addr_info with
+    | [] -> Lwt.fail_with "Bad host data"
+    | addr :: _ -> Lwt.return addr.Unix.ai_addr
+  in
+  let client_socket = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  let* () = Lwt_unix.connect client_socket sockaddr in
+  let input = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
+  let output = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
+  Lwt.return (input, output)
+
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
   let flag = (b land 0xc0) lsr 6 in
@@ -124,6 +139,19 @@ let parse_redis_rdb filename =
   done;
   !result
 
+let handle_replica_conn replicaof m =
+  if !replicaof <> "" then
+    let addr = String.split_on_char ' ' !replicaof in
+    let message =
+      Redis.encode_redis_value m (Redis.RedisArray ([ "PING" ], -1))
+    in
+    let* inp, out = create_client (List.hd addr) (List.nth addr 1) in
+    let* () = Lwt_io.write out message in
+    let* response = Lwt_io.read_line inp in
+    let* () = Lwt_io.printlf "Server replied: %s" response in
+    Lwt.return_unit
+  else Lwt.return_unit
+
 let main () =
   let dir = ref "" in
   let dbfilename = ref "" in
@@ -138,29 +166,28 @@ let main () =
     ]
   in
   Arg.parse speclist (fun x -> Printf.printf "%s" x) "";
+
   let pairs =
     if !dir <> "" && !dbfilename <> "" then
       try parse_redis_rdb (!dir ^ "/" ^ !dbfilename) with _exn -> []
     else []
   in
   (*let pairs = parse_redis_rdb (!dir ^ "/" ^ !dbfilename) in*)
-  let keys =
+  let keys, values =
     List.fold_left
-      (fun acc (k, _, _) -> (String.of_bytes k |> String.trim) ^ "\t" ^ acc)
-      "" pairs
-  in
-  (*ignore @@ failwith keys;*)
-  let values =
-    List.fold_left
-      (fun acc (_, v, _) -> (String.of_bytes v |> String.trim) ^ "\t" ^ acc)
-      "" pairs
+      (fun acc (k, v, _) ->
+        ( (String.of_bytes k |> String.trim) :: fst acc,
+          (String.of_bytes v |> String.trim) :: snd acc ))
+      ([], []) pairs
   in
   let m =
     ConfigMap.(
-      empty |> add "dir" !dir
-      |> add "dbfilename" !dbfilename
-      |> add "keys" keys |> add "values" values |> add "replicaof" !replicaof)
+      empty |> add "dir" [ !dir ]
+      |> add "dbfilename" [ !dbfilename ]
+      |> add "keys" keys |> add "values" values
+      |> add "replicaof" [ !replicaof ])
   in
+  let _ = handle_replica_conn replicaof m in
   List.iter
     (fun (k, v, exp) ->
       let k = Bytes.to_string k in
