@@ -15,6 +15,11 @@ let handle_client conn config =
             let encoded_result =
               Redis.encode_redis_value ~config ~conn redis_input
             in
+            let* () =
+              Lwt_io.printf "Input: %s"
+                (Redis.show_decoded_redis_type
+                   (Redis.decode_redis_value redis_input))
+            in
             let* () = Lwt_io.printf "Encoded: %s" encoded_result in
             let* () = Lwt_io.write output encoded_result in
 
@@ -83,7 +88,7 @@ let replicate conn config =
         Lwt.async (fun () -> handle_client (Some (inp, out)) config)
     | None -> ()
   in
-  Lwt.return_unit
+  ()
 
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
@@ -221,7 +226,7 @@ let main () =
       if exp <= 0L then ignore @@ Redis.handle_set [ ""; k; v ]
       else ignore @@ Redis.handle_set [ ""; k; v; "PX"; Int64.to_string exp ])
     pairs;
-  let* () = replicate handshake_conn m in
+  replicate handshake_conn m;
   start_server !port m
 
 let () = Lwt_main.run (main ())

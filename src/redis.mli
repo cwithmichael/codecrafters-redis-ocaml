@@ -22,5 +22,5 @@ val decode_redis_value : redis_value -> decoded_redis_type
 val parse_redis_input : bytes -> int -> redis_value
 (** Parses input data as RESP input *)
 
-val handle_set : string list -> redis_value option
+val handle_set : ?count:int -> string list -> redis_value option
 (** Set kv in dict*)

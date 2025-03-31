@@ -139,7 +139,8 @@ let handle_config input config_data =
       | _ -> failwith @@ "Unknown sub command for config " ^ s)
   | None -> failwith "Invalid input for config"
 
-let handle_set input : redis_value option =
+let handle_set ?(count = 0) input : redis_value option =
+  let count = if count > 0 then count - 1 else count in
   match
     ( List.nth_opt input 1,
       List.nth_opt input 2,
@@ -151,13 +152,13 @@ let handle_set input : redis_value option =
       Mutex.lock Config.queue_lock;
       Queue.add input Config.queue;
       Mutex.unlock Config.queue_lock;
-      Some (SimpleString ("OK", 0))
+      Some (SimpleString ("OK", count))
   | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
       (* only handle px for now*)
       update_dict key value;
       let x = sub_cmd_val |> Int64.of_string |> Int64.to_float in
       let _ = Lwt.ignore_result (handle_set_sub (Some sub_cmd) (Some x) key) in
-      Some (SimpleString ("OK", 0))
+      Some (SimpleString ("OK", count))
   | _ -> failwith "Invalid input for set"
 
 let handle_get input =
@@ -208,7 +209,7 @@ let rec encode_redis_value ?(config = ConfigMap.empty)
         | Some s -> encode_redis_value ~config ~conn s
         | None -> "")
 
-and check_for_redis_command input config_data
+and check_for_redis_command ?(count = 0) input config_data
     (conn : (Lwt_io.input_channel * Lwt_io.output_channel) option) =
   match List.nth_opt input 0 with
   | Some cmd -> (
@@ -238,7 +239,7 @@ and check_for_redis_command input config_data
       | "echo" -> handle_echo input
       | "config" -> handle_config input config_data
       | "set" ->
-          let result = handle_set input in
+          let result = handle_set input ~count in
           let _ =
             Queue.iter
               (fun conn ->
