@@ -13,7 +13,7 @@ let handle_client conn config =
         | n ->
             let redis_input = Redis.parse_redis_input (Bytes.sub buf 0 n) 0 in
             let encoded_result =
-              Redis.encode_redis_value ~config ~replica_conn:conn redis_input
+              Redis.encode_redis_value ~config ~conn redis_input
             in
             let* () = Lwt_io.printf "Encoded: %s" encoded_result in
             let* () = Lwt_io.write output encoded_result in
@@ -55,7 +55,8 @@ let handle_replica_handshake replicaof config =
           (Redis.RedisArray ([ "PSYNC"; "?"; "-1" ], -1))
       in
       let* () = Lwt_io.write out message in
-      let* _ = Lwt_io.read_line inp in
+      let buf = Bytes.make 149 '0' in
+      let* _ = Lwt_io.read_into_exactly inp buf 0 149 in
       Lwt.return_some (inp, out)
   | None -> Lwt.return_none
 
@@ -74,6 +75,15 @@ let start_server port config_data =
   Lwt_unix.listen server_socket 10;
   let* () = Lwt_io.printlf "Server started on port %d" port in
   accept_connections server_socket config_data
+
+let replicate conn config =
+  let _ =
+    match conn with
+    | Some (inp, out) ->
+        Lwt.async (fun () -> handle_client (Some (inp, out)) config)
+    | None -> ()
+  in
+  Lwt.return_unit
 
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
@@ -202,7 +212,7 @@ let main () =
       |> add "keys" keys |> add "values" values
       |> add "replicaof" [ !replicaof ])
   in
-  let* _handshake_conn = handle_replica_handshake replicaof m in
+  let* handshake_conn = handle_replica_handshake replicaof m in
   List.iter
     (fun (k, v, exp) ->
       let k = Bytes.to_string k in
@@ -211,6 +221,7 @@ let main () =
       if exp <= 0L then ignore @@ Redis.handle_set [ ""; k; v ]
       else ignore @@ Redis.handle_set [ ""; k; v; "PX"; Int64.to_string exp ])
     pairs;
+  let* () = replicate handshake_conn m in
   start_server !port m
 
 let () = Lwt_main.run (main ())

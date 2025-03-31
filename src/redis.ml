@@ -64,7 +64,7 @@ let parse_redis_input buf pos =
   match Bytes.get buf pos with
   | '-' -> failwith "Unsupported type"
   | '$' | '*' | '+' | ':' -> parse_value buf pos
-  | _ -> failwith "Invalid input"
+  | _ -> failwith (Printf.sprintf "Invalid input: %s" @@ Bytes.to_string buf)
 
 let dict = Hashtbl.create 10
 let dict_mutex = Mutex.create ()
@@ -189,23 +189,23 @@ let handle_psync =
 let replica_conns = Queue.create ()
 
 let rec encode_redis_value ?(config = ConfigMap.empty)
-    ?(replica_conn : (Lwt_io.input_channel * Lwt_io.output_channel) option =
-      None) input =
+    ?(conn : (Lwt_io.input_channel * Lwt_io.output_channel) option = None) input
+    =
   match input with
   | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
   | NullBulkString -> "$-1\r\n"
   | BulkString (str, d) -> (
       if d = -1 then create_bulk_string (Some str)
       else
-        match check_for_redis_command [ str ] config replica_conn with
-        | Some s -> encode_redis_value ~config ~replica_conn s
+        match check_for_redis_command [ str ] config conn with
+        | Some s -> encode_redis_value ~config ~conn s
         | None -> "$-1\r\n")
   | SimpleString (str, _) -> Printf.sprintf "+%s\r\n" str
   | RedisArray (elems, d) -> (
       if d = -1 then create_array_of_bulk_string elems
       else
-        match check_for_redis_command elems config replica_conn with
-        | Some s -> encode_redis_value ~config ~replica_conn s
+        match check_for_redis_command elems config conn with
+        | Some s -> encode_redis_value ~config ~conn s
         | None -> "")
 
 and check_for_redis_command input config_data

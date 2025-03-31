@@ -12,7 +12,7 @@ type decoded_redis_type = Int of int | String of string [@@deriving show]
 
 val encode_redis_value :
   ?config:string list ConfigMap.t ->
-  ?replica_conn:(Lwt_io.input_channel * Lwt_io.output_channel) option ->
+  ?conn:(Lwt_io.input_channel * Lwt_io.output_channel) option ->
   redis_value ->
   string
 (** Encodes the redis value to a RESP string *)
