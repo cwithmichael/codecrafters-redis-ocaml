@@ -13,6 +13,7 @@ depends: [
   "lwt"
   "lwt_ppx"
   "ptime"
+  "ppx_deriving"
   "odoc" {with-doc}
 ]
 build: [

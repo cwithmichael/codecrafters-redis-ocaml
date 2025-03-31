@@ -4,4 +4,4 @@
  (name main)
  (libraries base64 unix lwt lwt_ppx lwt.unix ptime)
  (preprocess
-  (pps lwt_ppx)))
+  (pps ppx_deriving.show lwt_ppx)))

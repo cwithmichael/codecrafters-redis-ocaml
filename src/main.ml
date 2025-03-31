@@ -2,42 +2,68 @@ open Config
 
 let ( let* ) = Lwt.bind
 
-let handle_client (input, output) config_data =
-  let rec handle_command () =
-    let buf = Bytes.make 1024 '0' in
-    let* n = Lwt_io.read_into input buf 0 1024 in
-    match n with
-    | 0 -> Lwt_io.printl "Client disconnected"
-    | size ->
-        let input = Redis.parse_redis_input (Bytes.sub buf 0 size) 0 in
-        let encoded_result = Redis.encode_redis_value config_data input in
-        let* () = Lwt_io.printf "Encoded: %s" encoded_result in
-        let* () = Lwt_io.write output encoded_result in
-        let _ =
-          match input with
-          | RedisArray (str :: _, _) ->
-              let* () = Lwt_io.printf "InputString: %s\n" str in
-              if String.lowercase_ascii str = "psync" then
-                let empty_rdb =
-                  Base64.decode_exn
-                    "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
-                in
-                let rdb_string =
-                  Printf.sprintf "$%d\r\n%s" (String.length empty_rdb) empty_rdb
-                in
-                Lwt_io.write output rdb_string
-              else Lwt.return_unit
-          | _ -> Lwt.return_unit
-        in
-        handle_command ()
+let handle_client conn config =
+  let rec handle_command conn =
+    match conn with
+    | Some (input, output) -> (
+        let buf = Bytes.make 1024 '0' in
+        let* n = Lwt_io.read_into input buf 0 1024 in
+        match n with
+        | 0 -> Lwt_io.printl "Client disconnected"
+        | n ->
+            let redis_input = Redis.parse_redis_input (Bytes.sub buf 0 n) 0 in
+            let encoded_result =
+              Redis.encode_redis_value ~config ~replica_conn:conn redis_input
+            in
+            let* () = Lwt_io.printf "Encoded: %s" encoded_result in
+            let* () = Lwt_io.write output encoded_result in
+
+            handle_command conn)
+    | None -> failwith "Nope"
   in
-  handle_command ()
+  handle_command conn
+
+let handle_replica_handshake replicaof config =
+  let* replica_value = Util.connect_to_master replicaof in
+  match replica_value with
+  | Some (inp, out) ->
+      let message =
+        Redis.encode_redis_value ~config (Redis.RedisArray ([ "PING" ], -1))
+      in
+      let* () = Lwt_io.write out message in
+      let* _ = Lwt_io.read_line inp in
+      let message =
+        Redis.encode_redis_value ~config
+          (Redis.RedisArray
+             ( [
+                 "REPLCONF";
+                 "listening-port";
+                 List.hd @@ ConfigMap.find "port" config;
+               ],
+               -1 ))
+      in
+      let* () = Lwt_io.write out message in
+      let* _ = Lwt_io.read_line inp in
+      let message =
+        Redis.encode_redis_value ~config
+          (Redis.RedisArray ([ "REPLCONF"; "capa"; "psync2" ], -1))
+      in
+      let* () = Lwt_io.write out message in
+      let* _ = Lwt_io.read_line inp in
+      let message =
+        Redis.encode_redis_value ~config
+          (Redis.RedisArray ([ "PSYNC"; "?"; "-1" ], -1))
+      in
+      let* () = Lwt_io.write out message in
+      let* _ = Lwt_io.read_line inp in
+      Lwt.return_some (inp, out)
+  | None -> Lwt.return_none
 
 let rec accept_connections server_socket config_data =
   let* client_socket, _addr = Lwt_unix.accept server_socket in
   let input = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
   let output = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
-  Lwt.async (fun () -> handle_client (input, output) config_data);
+  Lwt.async (fun () -> handle_client (Some (input, output)) config_data);
   accept_connections server_socket config_data
 
 let start_server port config_data =
@@ -48,21 +74,6 @@ let start_server port config_data =
   Lwt_unix.listen server_socket 10;
   let* () = Lwt_io.printlf "Server started on port %d" port in
   accept_connections server_socket config_data
-
-let create_client host port =
-  let* addr_info =
-    Lwt_unix.getaddrinfo host port [ Unix.(AI_FAMILY PF_INET) ]
-  in
-  let* sockaddr =
-    match addr_info with
-    | [] -> Lwt.fail_with "Bad host data"
-    | addr :: _ -> Lwt.return addr.Unix.ai_addr
-  in
-  let client_socket = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  let* () = Lwt_unix.connect client_socket sockaddr in
-  let input = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
-  let output = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
-  Lwt.return (input, output)
 
 let decode_length data pos =
   let b = int_of_char @@ Bytes.get data pos in
@@ -155,38 +166,6 @@ let parse_redis_rdb filename =
   done;
   !result
 
-let handle_replica_conn replicaof m =
-  if !replicaof <> "" then
-    let addr = String.split_on_char ' ' !replicaof in
-    let message =
-      Redis.encode_redis_value m (Redis.RedisArray ([ "PING" ], -1))
-    in
-    let* inp, out = create_client (List.hd addr) (List.nth addr 1) in
-    let* () = Lwt_io.write out message in
-    let* _ = Lwt_io.read_line inp in
-    let message =
-      Redis.encode_redis_value m
-        (Redis.RedisArray
-           ( [ "REPLCONF"; "listening-port"; List.hd @@ ConfigMap.find "port" m ],
-             -1 ))
-    in
-    let* () = Lwt_io.write out message in
-    let* _ = Lwt_io.read_line inp in
-    let message =
-      Redis.encode_redis_value m
-        (Redis.RedisArray ([ "REPLCONF"; "capa"; "psync2" ], -1))
-    in
-    let* () = Lwt_io.write out message in
-    let* _ = Lwt_io.read_line inp in
-    let message =
-      Redis.encode_redis_value m (Redis.RedisArray ([ "PSYNC"; "?"; "-1" ], -1))
-    in
-    let* () = Lwt_io.write out message in
-    let* response = Lwt_io.read_line inp in
-    let* () = Lwt_io.printlf "Server replied: %s" response in
-    Lwt.return_unit
-  else Lwt.return_unit
-
 let main () =
   let dir = ref "" in
   let dbfilename = ref "" in
@@ -223,7 +202,7 @@ let main () =
       |> add "keys" keys |> add "values" values
       |> add "replicaof" [ !replicaof ])
   in
-  let _ = handle_replica_conn replicaof m in
+  let* _handshake_conn = handle_replica_handshake replicaof m in
   List.iter
     (fun (k, v, exp) ->
       let k = Bytes.to_string k in

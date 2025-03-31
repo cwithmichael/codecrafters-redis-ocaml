@@ -19,6 +19,7 @@ type redis_value =
   | RedisInt of int * int
   | SimpleString of string * int
   | NullBulkString
+[@@deriving show]
 
 let parse_int buf pos =
   let num_str, next_pos = read_until_crlf buf pos in
@@ -138,7 +139,7 @@ let handle_config input config_data =
       | _ -> failwith @@ "Unknown sub command for config " ^ s)
   | None -> failwith "Invalid input for config"
 
-let handle_set input =
+let handle_set input : redis_value option =
   match
     ( List.nth_opt input 1,
       List.nth_opt input 2,
@@ -147,12 +148,15 @@ let handle_set input =
   with
   | Some key, Some value, None, None ->
       update_dict key value;
+      Mutex.lock Config.queue_lock;
+      Queue.add input Config.queue;
+      Mutex.unlock Config.queue_lock;
       Some (SimpleString ("OK", 0))
   | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
       (* only handle px for now*)
       update_dict key value;
       let x = sub_cmd_val |> Int64.of_string |> Int64.to_float in
-      Lwt.ignore_result (handle_set_sub (Some sub_cmd) (Some x) key);
+      let _ = Lwt.ignore_result (handle_set_sub (Some sub_cmd) (Some x) key) in
       Some (SimpleString ("OK", 0))
   | _ -> failwith "Invalid input for set"
 
@@ -178,21 +182,72 @@ let handle_info _ config_data =
 
 let handle_replconf _ _config_data = Some (SimpleString ("OK", -1))
 
-let handle_psync _ _config_data =
+let handle_psync =
   let resp = Printf.sprintf "FULLRESYNC %s 0" repl_id in
   Some (SimpleString (resp, -1))
 
-let check_for_redis_command input config_data =
+let replica_conns = Queue.create ()
+
+let rec encode_redis_value ?(config = ConfigMap.empty)
+    ?(replica_conn : (Lwt_io.input_channel * Lwt_io.output_channel) option =
+      None) input =
+  match input with
+  | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
+  | NullBulkString -> "$-1\r\n"
+  | BulkString (str, d) -> (
+      if d = -1 then create_bulk_string (Some str)
+      else
+        match check_for_redis_command [ str ] config replica_conn with
+        | Some s -> encode_redis_value ~config ~replica_conn s
+        | None -> "$-1\r\n")
+  | SimpleString (str, _) -> Printf.sprintf "+%s\r\n" str
+  | RedisArray (elems, d) -> (
+      if d = -1 then create_array_of_bulk_string elems
+      else
+        match check_for_redis_command elems config replica_conn with
+        | Some s -> encode_redis_value ~config ~replica_conn s
+        | None -> "")
+
+and check_for_redis_command input config_data
+    (conn : (Lwt_io.input_channel * Lwt_io.output_channel) option) =
   match List.nth_opt input 0 with
   | Some cmd -> (
       match String.lowercase_ascii cmd with
-      | "psync" -> handle_psync input config_data
+      | "psync" ->
+          let result = handle_psync in
+          let empty_rdb =
+            Base64.decode_exn
+              "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
+          in
+          let rdb_string =
+            Printf.sprintf "$%d\r\n%s" (String.length empty_rdb) empty_rdb
+          in
+          let _ =
+            match conn with
+            | Some (_inp, out) ->
+                Queue.add out replica_conns;
+                Lwt.ignore_result
+                  (Lwt_io.write out (encode_redis_value (Option.get result)));
+                Lwt.ignore_result (Lwt_io.write out rdb_string)
+            | None -> ()
+          in
+          None
       | "replconf" -> handle_replconf input config_data
       | "info" -> handle_info input config_data
       | "ping" -> handle_ping
       | "echo" -> handle_echo input
       | "config" -> handle_config input config_data
-      | "set" -> handle_set input
+      | "set" ->
+          let result = handle_set input in
+          let _ =
+            Queue.iter
+              (fun conn ->
+                Lwt.ignore_result
+                  (Lwt_io.write conn
+                     (encode_redis_value (RedisArray (input, -1)))))
+              replica_conns
+          in
+          result
       | "get" -> handle_get input
       | "keys" -> (
           match ConfigMap.find_opt "keys" config_data with
@@ -203,19 +258,12 @@ let check_for_redis_command input config_data =
       | _ -> failwith @@ "Unsupported command " ^ cmd)
   | None -> None
 
-let rec encode_redis_value config_data = function
-  | RedisInt (i, _) -> Printf.sprintf "%d\r\n" i
-  | NullBulkString -> "$-1\r\n"
-  | BulkString (str, d) -> (
-      if d = -1 then create_bulk_string (Some str)
-      else
-        match check_for_redis_command [ str ] config_data with
-        | Some s -> encode_redis_value config_data s
-        | None -> "$-1\r\n")
-  | SimpleString (str, _) -> Printf.sprintf "+%s\r\n" str
-  | RedisArray (elems, d) -> (
-      if d = -1 then create_array_of_bulk_string elems
-      else
-        match check_for_redis_command elems config_data with
-        | Some s -> encode_redis_value config_data s
-        | None -> failwith "Bad array data")
+type decoded_redis_type = Int of int | String of string [@@deriving show]
+
+let decode_redis_value input =
+  match input with
+  | RedisInt (i, _) -> Int i
+  | NullBulkString -> String "$-1\r\n"
+  | BulkString (str, _) -> String str
+  | SimpleString (str, _) -> String str
+  | RedisArray (elems, _) -> String (create_array_of_bulk_string elems)
