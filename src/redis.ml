@@ -83,12 +83,14 @@ let delay_execution f timeout =
   let* () = Lwt_unix.sleep @@ timeout in
   f ()
 
-let handle_set_sub cmd v key =
-  match cmd with
-  | Some _ -> (
+let handle_set_sub key cmd cmd_v =
+  Lwt.ignore_result @@ Lwt_io.printf "cmd: %s" cmd;
+  match String.lowercase_ascii cmd with
+  | "px" -> (
       (*only handle px for now*)
-      match v with
+      match cmd_v with
       | Some delay ->
+          let delay = delay |> Int64.of_string |> Int64.to_float in
           let* () = Lwt_io.printf "Scheduled to remove %s : %f\n" key delay in
           let delay = delay /. 1000. in
           let tm = Unix.gmtime delay in
@@ -104,7 +106,7 @@ let handle_set_sub cmd v key =
                 Lwt.return ())
               delay
       | None -> Lwt.return_unit)
-  | None -> failwith "Unsupported subcommand"
+  | _ -> failwith "Unsupported subcommand"
 
 let create_bulk_string data =
   match data with
@@ -141,23 +143,20 @@ let handle_config input config_data =
 
 let handle_set ?(count = 0) input : redis_value option =
   let count = if count > 0 then count - 1 else count in
-  match
-    ( List.nth_opt input 1,
-      List.nth_opt input 2,
-      List.nth_opt input 3,
-      List.nth_opt input 4 )
-  with
-  | Some key, Some value, None, None ->
+  match input with
+  | [ _; key; value ] ->
       update_dict key value;
       Mutex.lock Config.queue_lock;
       Queue.add input Config.queue;
       Mutex.unlock Config.queue_lock;
       Some (SimpleString ("OK", count))
-  | Some key, Some value, Some sub_cmd, Some sub_cmd_val ->
+  | _ :: key :: value :: xs ->
       (* only handle px for now*)
       update_dict key value;
-      let x = sub_cmd_val |> Int64.of_string |> Int64.to_float in
-      let _ = Lwt.ignore_result (handle_set_sub (Some sub_cmd) (Some x) key) in
+      let sub_cmd = List.nth_opt xs 0 in
+      let sub_cmd_val = List.nth_opt xs 1 in
+      if Option.is_some sub_cmd then
+        Lwt.ignore_result (handle_set_sub key (Option.get sub_cmd) sub_cmd_val);
       Some (SimpleString ("OK", count))
   | _ -> failwith "Invalid input for set"
 
