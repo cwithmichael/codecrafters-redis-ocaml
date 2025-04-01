@@ -5,26 +5,41 @@ let ( let* ) = Lwt.bind
 let handle_client conn config =
   let rec handle_command conn =
     match conn with
-    | Some (input, output) -> (
+    | Some (input, output) ->
         let buf = Bytes.make 1024 '0' in
         let* n = Lwt_io.read_into input buf 0 1024 in
-        match n with
-        | 0 -> Lwt_io.printl "Client disconnected"
-        | n ->
-            let redis_input = Redis.parse_redis_input (Bytes.sub buf 0 n) 0 in
-            let encoded_result =
-              Redis.encode_redis_value ~config ~conn redis_input
-            in
-            let* () =
-              Lwt_io.printf "Input: %s"
-                (Redis.show_decoded_redis_type
-                   (Redis.decode_redis_value redis_input))
-            in
-            let* () = Lwt_io.printf "Encoded: %s" encoded_result in
-            let* () = Lwt_io.write output encoded_result in
-
-            handle_command conn)
-    | None -> failwith "Nope"
+        let* () = Lwt_io.printl (Bytes.to_string (Bytes.sub buf 0 n)) in
+        if n = 0 then
+          let* () = Lwt_io.printl "Client disconnected" in
+          Lwt.return_unit
+        else
+          let rec process_commands pos =
+            if pos < n then
+              let redis_input = Redis.parse_redis_input buf pos in
+              let* pos =
+                match redis_input with
+                | RedisArray (s, d) ->
+                    let* () =
+                      Lwt_io.printf "Array: %s %d\n" (String.concat " " s) d
+                    in
+                    if d > pos then Lwt.return d else Lwt.return pos
+                | _ -> Lwt.return pos
+              in
+              let encoded_result =
+                Redis.encode_redis_value ~config ~conn redis_input
+              in
+              let* () =
+                Lwt_io.printf "Input: %s"
+                  (Redis.show_decoded_redis_type
+                     (Redis.decode_redis_value redis_input))
+              in
+              let* () = Lwt_io.printf "Encoded: %s" encoded_result in
+              let* () = Lwt_io.write output encoded_result in
+              process_commands pos
+            else handle_command conn
+          in
+          process_commands 0
+    | None -> Lwt.return_unit
   in
   handle_command conn
 
