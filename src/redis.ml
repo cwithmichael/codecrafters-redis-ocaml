@@ -181,7 +181,10 @@ let handle_info _ config_data =
       Some (BulkString (info_data, -1))
   | _ -> Some (BulkString ("role:slave", -1))
 
-let handle_replconf _ _config_data = Some (SimpleString ("OK", -1))
+let handle_replconf input =
+  match input with
+  | _ :: "GETACK" :: _ -> Some (RedisArray ([ "REPLCONF"; "ACK"; "0" ], -1))
+  | _ -> Some (SimpleString ("OK", -1))
 
 let handle_psync =
   let resp = Printf.sprintf "FULLRESYNC %s 0" repl_id in
@@ -233,7 +236,7 @@ and check_for_redis_command ?(count = 0) input config_data
             | None -> ()
           in
           None
-      | "replconf" -> handle_replconf input config_data
+      | "replconf" -> handle_replconf input
       | "info" -> handle_info input config_data
       | "ping" -> handle_ping
       | "echo" -> handle_echo input
