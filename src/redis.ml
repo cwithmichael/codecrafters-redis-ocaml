@@ -91,12 +91,13 @@ let handle_set_sub key cmd cmd_v =
       match cmd_v with
       | Some delay ->
           let delay = delay |> Int64.of_string |> Int64.to_float in
-          let* () = Lwt_io.printf "Scheduled to remove %s : %f\n" key delay in
           let delay = delay /. 1000. in
           let tm = Unix.gmtime delay in
           let cur_tm = Unix.gmtime (Unix.time ()) in
-          (* figure out a better check than this smh *)
-          if delay > 100000. && tm.tm_year < cur_tm.tm_year then (
+          let px_year = tm.tm_year + 1900 in
+          let cur_year = cur_tm.tm_year + 1900 in
+          let* () = Lwt_io.printf "\nScheduled to remove %s : %f\n" key delay in
+          if px_year > 1970 && px_year < cur_year then (
             delete_from_dict key;
             Lwt.return ())
           else
