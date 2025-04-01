@@ -122,13 +122,13 @@ let create_array_of_bulk_string data =
 let handle_ping = Some (SimpleString ("PONG", 0))
 
 let handle_echo input =
-  match List.nth_opt input 1 with
-  | Some s -> Some (SimpleString (s, 0))
+  match input with
+  | _ :: s :: _ -> Some (SimpleString (s, 0))
   | _ -> failwith "Invalid input for echo"
 
 let handle_config input config_data =
-  match List.nth_opt input 2 with
-  | Some s -> (
+  match input with
+  | _ :: _ :: s :: _ -> (
       match String.lowercase_ascii s with
       | "dir" ->
           let dir = List.hd @@ ConfigMap.find "dir" config_data in
@@ -137,7 +137,7 @@ let handle_config input config_data =
           let dbfilename = List.hd @@ ConfigMap.find "dbfilename" config_data in
           Some (RedisArray ([ "dbfilename"; dbfilename ], -1))
       | _ -> failwith @@ "Unknown sub command for config " ^ s)
-  | None -> failwith "Invalid input for config"
+  | _ -> failwith "Invalid input for config"
 
 let handle_set ?(count = 0) input : redis_value option =
   let count = if count > 0 then count - 1 else count in
@@ -162,8 +162,8 @@ let handle_set ?(count = 0) input : redis_value option =
   | _ -> failwith "Invalid input for set"
 
 let handle_get input =
-  match List.nth_opt input 1 with
-  | Some key -> (
+  match input with
+  | _ :: key :: _ -> (
       match Hashtbl.find_opt dict key with
       | None -> Some NullBulkString
       | Some v -> Some (BulkString (v, -1)))
@@ -214,8 +214,8 @@ let rec encode_redis_value ?(config = ConfigMap.empty)
 
 and check_for_redis_command ?(count = 0) input config_data
     (conn : (Lwt_io.input_channel * Lwt_io.output_channel) option) =
-  match List.nth_opt input 0 with
-  | Some cmd -> (
+  match input with
+  | cmd :: _ -> (
       match String.lowercase_ascii cmd with
       | "psync" ->
           let result = handle_psync in
@@ -260,7 +260,7 @@ and check_for_redis_command ?(count = 0) input config_data
               Some (RedisArray (keys, -1))
           | None -> Some NullBulkString)
       | _ -> failwith @@ "Unsupported command " ^ cmd)
-  | None -> None
+  | _ -> None
 
 type decoded_redis_type = Int of int | String of string [@@deriving show]
 
